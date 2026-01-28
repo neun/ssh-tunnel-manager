@@ -29,6 +29,7 @@ struct TunnelListView: View {
         }
     }
 
+    @MainActor
     private func deleteTunnels(at offsets: IndexSet) {
         for index in offsets {
             let tunnel = tunnelManager.tunnels[index]

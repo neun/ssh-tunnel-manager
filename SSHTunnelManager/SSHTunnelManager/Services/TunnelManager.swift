@@ -11,7 +11,7 @@ private let pidFileURL: URL = {
 }()
 
 /// Process group ID for all SSH child processes
-private var sshProcessGroupID: pid_t = 0
+nonisolated(unsafe) private var sshProcessGroupID: pid_t = 0
 
 /// Kill SSH processes using specified local port
 private func findAndKillSSHProcesses(localPort: Int) {
@@ -218,10 +218,11 @@ class TunnelManager {
             // Save PIDs to file for crash recovery
             updatePIDFile()
 
+            let tunnelID = tunnel.id
             Task.detached { [weak self] in
                 process.waitUntilExit()
-                await MainActor.run {
-                    self?.handleProcessTermination(tunnelID: tunnel.id)
+                await MainActor.run { [weak self] in
+                    self?.handleProcessTermination(tunnelID: tunnelID)
                 }
             }
         } catch {

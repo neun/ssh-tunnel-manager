@@ -64,6 +64,7 @@ struct TunnelMenuItem: View {
     let tunnel: Tunnel
     @Environment(TunnelManager.self) private var tunnelManager
 
+    @MainActor
     private var status: ConnectionStatus {
         tunnelManager.status(for: tunnel)
     }

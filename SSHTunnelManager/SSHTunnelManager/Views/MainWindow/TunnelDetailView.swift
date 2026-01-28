@@ -17,6 +17,7 @@ struct TunnelDetailView: View {
         self._editedTunnel = State(initialValue: tunnel)
     }
 
+    @MainActor
     private var status: ConnectionStatus {
         tunnelManager.status(for: tunnel)
     }
@@ -187,6 +188,7 @@ struct TunnelDetailView: View {
         }
     }
 
+    @MainActor
     private func saveChanges() {
         tunnelManager.updateTunnel(editedTunnel)
         hasChanges = false
