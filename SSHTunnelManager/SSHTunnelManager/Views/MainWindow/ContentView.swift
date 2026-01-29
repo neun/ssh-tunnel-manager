@@ -1,6 +1,7 @@
 import SwiftUI
 import ServiceManagement
 
+@MainActor
 struct ContentView: View {
     @Environment(TunnelManager.self) private var tunnelManager
     @State private var selectedTunnel: Tunnel?
