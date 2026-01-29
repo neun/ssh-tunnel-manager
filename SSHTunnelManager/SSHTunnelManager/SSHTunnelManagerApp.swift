@@ -55,6 +55,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             name: NSWorkspace.willPowerOffNotification,
             object: nil
         )
+
+        // Observe window closing to return focus to previous app
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWindowClose),
+            name: NSWindow.willCloseNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleWindowClose(_ notification: Notification) {
+        // When Settings window closes, hide app to return focus to previous app
+        // Small delay to ensure window is fully closed
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            // Only hide if no windows are visible
+            if NSApp.windows.filter({ $0.isVisible && $0.className != "NSStatusBarWindow" }).isEmpty {
+                NSApp.hide(nil)
+            }
+        }
     }
 
     @objc private func workspaceWillPowerOff(_ notification: Notification) {
