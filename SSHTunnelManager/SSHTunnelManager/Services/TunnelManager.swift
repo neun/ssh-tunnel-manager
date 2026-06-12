@@ -13,6 +13,13 @@ private let pidFileURL: URL = {
 /// Process group ID for all SSH child processes (accessed from signal handlers, so must be global)
 private var sshProcessGroupID: pid_t = 0
 
+/// Kill SSH processes for all local ports in a tunnel
+private func killSSHProcessesForTunnel(_ tunnel: Tunnel) {
+    for mapping in tunnel.portMappings {
+        findAndKillSSHProcesses(localPort: mapping.localPort)
+    }
+}
+
 /// Kill SSH processes using specified local port
 private func findAndKillSSHProcesses(localPort: Int) {
     let task = Process()
@@ -114,11 +121,10 @@ class TunnelManager {
     }
 
     private func reconnect(tunnel: Tunnel) {
-        let localPort = tunnel.localPort
         let tunnelCopy = tunnel
 
         Task.detached {
-            findAndKillSSHProcesses(localPort: localPort)
+            killSSHProcessesForTunnel(tunnelCopy)
             try? await Task.sleep(for: .milliseconds(100))
 
             await MainActor.run {
@@ -156,11 +162,10 @@ class TunnelManager {
         shouldBeConnected.insert(tunnel.id)
         connectionStatus[tunnel.id] = .connecting
 
-        let localPort = tunnel.localPort
         let tunnelCopy = tunnel
 
         Task.detached {
-            findAndKillSSHProcesses(localPort: localPort)
+            killSSHProcessesForTunnel(tunnelCopy)
             try? await Task.sleep(for: .milliseconds(100))
 
             await MainActor.run {
@@ -176,10 +181,8 @@ class TunnelManager {
         shouldBeConnected.insert(tunnel.id)
         connectionStatus[tunnel.id] = .connecting
 
-        let localPort = tunnel.localPort
-
         await Task.detached {
-            findAndKillSSHProcesses(localPort: localPort)
+            killSSHProcessesForTunnel(tunnel)
             try? await Task.sleep(for: .milliseconds(100))
         }.value
 
@@ -190,14 +193,20 @@ class TunnelManager {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
 
-        var arguments = [
-            "-N",
-            "-L", "\(tunnel.localHost):\(tunnel.localPort):\(tunnel.remoteHost):\(tunnel.remotePort)",
+        var arguments = ["-N"]
+
+        for mapping in tunnel.portMappings {
+            arguments.append(contentsOf: [
+                "-L", "\(mapping.localHost):\(mapping.localPort):\(mapping.remoteHost):\(mapping.remotePort)"
+            ])
+        }
+
+        arguments.append(contentsOf: [
             tunnel.host,
             "-o", "ExitOnForwardFailure=yes",
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3"
-        ]
+        ])
 
         // When using alias, skip -p for default port 22 and skip -i entirely
         if tunnel.useAlias {
@@ -293,10 +302,7 @@ class TunnelManager {
         let newTunnel = Tunnel(
             name: "New Tunnel",
             host: "user@example.com",
-            port: 22,
-            localPort: 8080,
-            remoteHost: "127.0.0.1",
-            remotePort: 8080
+            port: 22
         )
         tunnels.append(newTunnel)
         Task { await saveTunnels() }
@@ -365,7 +371,7 @@ class TunnelManager {
 
         // Also kill by local port pattern as backup (catches any missed processes)
         for tunnel in tunnels {
-            findAndKillSSHProcesses(localPort: tunnel.localPort)
+            killSSHProcessesForTunnel(tunnel)
         }
 
         processIDs.removeAll()

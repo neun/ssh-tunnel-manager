@@ -95,8 +95,9 @@ struct TunnelMenuItem: View {
 
             Spacer(minLength: 8)
 
-            Text(":\(tunnel.localPort)")
+            Text(tunnel.localPortsSummary)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
 
             Toggle("", isOn: Binding(
                 get: { isOn },

@@ -10,7 +10,7 @@ struct TunnelDetailView: View {
     @State private var hasChanges = false
 
     enum Field: Hashable {
-        case name, host, port, identityFile, localHost, localPort, remoteHost, remotePort, alias
+        case name, host, port, identityFile, alias
     }
 
     init(tunnel: Tunnel) {
@@ -40,7 +40,6 @@ struct TunnelDetailView: View {
 
     var body: some View {
         Form {
-            // Status section at top
             Section {
                 HStack {
                     StatusIndicator(status: status)
@@ -50,7 +49,6 @@ struct TunnelDetailView: View {
                     Spacer()
 
                     Button(status != .disconnected ? "Disconnect" : "Connect") {
-                        // Save any pending changes before toggling
                         if hasChanges {
                             saveChanges()
                         }
@@ -124,39 +122,26 @@ struct TunnelDetailView: View {
             }
 
             Section {
-                LabeledContent("Local") {
-                    HStack(spacing: 4) {
-                        TextField("Host", text: $editedTunnel.localHost)
-                            .textFieldStyle(.roundedBorder)
-                            .labelsHidden()
-                            .focused($focusedField, equals: .localHost)
-                        Text(":")
-                            .foregroundStyle(.secondary)
-                        TextField("", value: $editedTunnel.localPort, format: .number)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 70)
-                            .labelsHidden()
-                            .focused($focusedField, equals: .localPort)
-                    }
+                ForEach($editedTunnel.portMappings) { $mapping in
+                    PortMappingEditor(
+                        mapping: $mapping,
+                        canRemove: editedTunnel.portMappings.count > 1,
+                        onRemove: { removeMapping(mapping.id) }
+                    )
                 }
 
-                LabeledContent("Remote") {
-                    HStack(spacing: 4) {
-                        TextField("Host", text: $editedTunnel.remoteHost)
-                            .textFieldStyle(.roundedBorder)
-                            .labelsHidden()
-                            .focused($focusedField, equals: .remoteHost)
-                        Text(":")
-                            .foregroundStyle(.secondary)
-                        TextField("", value: $editedTunnel.remotePort, format: .number)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 70)
-                            .labelsHidden()
-                            .focused($focusedField, equals: .remotePort)
-                    }
+                Button {
+                    editedTunnel.portMappings.append(PortMapping(
+                        localPort: nextLocalPort(),
+                        remotePort: nextLocalPort()
+                    ))
+                } label: {
+                    Label("Add Port Mapping", systemImage: "plus")
                 }
             } header: {
                 Text("Port Forwarding")
+            } footer: {
+                Text("Each mapping adds a -L flag to the SSH command.")
             }
 
             Section {
@@ -165,11 +150,14 @@ struct TunnelDetailView: View {
                 Text("Options")
             }
 
-            // Usage examples section
             if status == .connected {
                 Section {
-                    UsageRow(label: "HTTP", value: "http://\(tunnel.localHost):\(tunnel.localPort)")
-                    UsageRow(label: "Host:Port", value: "\(tunnel.localHost):\(tunnel.localPort)")
+                    ForEach(editedTunnel.portMappings) { mapping in
+                        UsageRow(
+                            label: ":\(mapping.localPort)",
+                            value: "http://\(mapping.localHost):\(mapping.localPort)"
+                        )
+                    }
                 } header: {
                     Text("Usage")
                 }
@@ -181,7 +169,6 @@ struct TunnelDetailView: View {
         .padding(.vertical, 8)
         .contentShape(Rectangle())
         .onTapGesture {
-            // Clear focus when tapping empty space, which triggers auto-save
             focusedField = nil
         }
         .toolbar {
@@ -200,11 +187,23 @@ struct TunnelDetailView: View {
             hasChanges = false
         }
         .onChange(of: focusedField) { oldValue, newValue in
-            // Auto-save when focus changes (field loses focus)
             if oldValue != nil && newValue != oldValue && hasChanges {
                 saveChanges()
             }
         }
+    }
+
+    private func removeMapping(_ id: UUID) {
+        editedTunnel.portMappings.removeAll { $0.id == id }
+    }
+
+    private func nextLocalPort() -> Int {
+        let usedPorts = Set(editedTunnel.portMappings.map(\.localPort))
+        var port = (editedTunnel.portMappings.map(\.localPort).max() ?? 8079) + 1
+        while usedPorts.contains(port) {
+            port += 1
+        }
+        return port
     }
 
     private func saveChanges() {
@@ -213,14 +212,15 @@ struct TunnelDetailView: View {
     }
 
     private func sshCommand(for tunnel: Tunnel) -> String {
-        var cmd = "ssh -N -L \(tunnel.localHost):\(tunnel.localPort):\(tunnel.remoteHost):\(tunnel.remotePort)"
+        var cmd = "ssh -N"
+        for mapping in tunnel.portMappings {
+            cmd += " -L \(mapping.localHost):\(mapping.localPort):\(mapping.remoteHost):\(mapping.remotePort)"
+        }
         if tunnel.useAlias {
-            // For alias mode, only add -p if not default port
             if tunnel.port != 22 {
                 cmd += " -p \(tunnel.port)"
             }
         } else {
-            // For host mode, always add -p and optionally -i
             if tunnel.port != 22 {
                 cmd += " -p \(tunnel.port)"
             }
@@ -230,6 +230,52 @@ struct TunnelDetailView: View {
         }
         cmd += " \(tunnel.host)"
         return cmd
+    }
+}
+
+struct PortMappingEditor: View {
+    @Binding var mapping: PortMapping
+    let canRemove: Bool
+    let onRemove: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            LabeledContent("Local") {
+                HStack(spacing: 4) {
+                    TextField("Host", text: $mapping.localHost)
+                        .textFieldStyle(.roundedBorder)
+                        .labelsHidden()
+                    Text(":")
+                        .foregroundStyle(.secondary)
+                    TextField("", value: $mapping.localPort, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                        .labelsHidden()
+                }
+            }
+
+            LabeledContent("Remote") {
+                HStack(spacing: 4) {
+                    TextField("Host", text: $mapping.remoteHost)
+                        .textFieldStyle(.roundedBorder)
+                        .labelsHidden()
+                    Text(":")
+                        .foregroundStyle(.secondary)
+                    TextField("", value: $mapping.remotePort, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                        .labelsHidden()
+                }
+            }
+
+            if canRemove {
+                Button("Remove", role: .destructive) {
+                    onRemove()
+                }
+                .font(.caption)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
@@ -272,10 +318,10 @@ struct UsageRow: View {
         name: "Test Tunnel",
         host: "user@example.com",
         port: 22,
-        localHost: "127.0.0.1",
-        localPort: 8080,
-        remoteHost: "127.0.0.1",
-        remotePort: 8080
+        portMappings: [
+            PortMapping(localPort: 8080, remotePort: 8080),
+            PortMapping(localPort: 5432, remotePort: 5432)
+        ]
     ))
     .environment(TunnelManager())
     .frame(width: 500, height: 700)
