@@ -105,7 +105,7 @@ struct TunnelRow: View {
                     .fontWeight(.medium)
                     .lineLimit(1)
 
-                Text(":\(tunnel.localPort) → :\(tunnel.remotePort)")
+                Text(tunnel.mappingsSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

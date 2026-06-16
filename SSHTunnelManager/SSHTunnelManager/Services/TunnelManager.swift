@@ -21,6 +21,13 @@ private let pidFileURL: URL = {
 /// startup and read from C-level signal/atexit handlers that have no actor context.
 private nonisolated(unsafe) var sshProcessGroupID: pid_t = 0
 
+/// Kill SSH processes for all local ports in a tunnel
+private func killSSHProcessesForTunnel(_ tunnel: Tunnel) {
+    for mapping in tunnel.portMappings {
+        findAndKillSSHProcesses(localPort: mapping.localPort)
+    }
+}
+
 /// Kill SSH processes using specified local port
 private func findAndKillSSHProcesses(localPort: Int) {
     let task = Process()
@@ -124,7 +131,7 @@ class TunnelManager {
         }
     }
 
-    /// Free the local port, then launch the SSH process for a tunnel.
+    /// Free the local ports, then launch the SSH process for a tunnel.
     /// `connectingInFlight` guards against concurrent callers (a manual connect
     /// and the reconnect monitor) racing to start two processes for one tunnel.
     private func beginConnecting(tunnel: Tunnel) {
@@ -133,11 +140,10 @@ class TunnelManager {
         connectingInFlight.insert(id)
         connectionStatus[id] = .connecting
 
-        let localPort = tunnel.localPort
         let tunnelCopy = tunnel
 
         Task.detached {
-            findAndKillSSHProcesses(localPort: localPort)
+            killSSHProcessesForTunnel(tunnelCopy)
             try? await Task.sleep(for: .milliseconds(100))
 
             await MainActor.run {
@@ -201,38 +207,40 @@ class TunnelManager {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
 
-        var arguments = [
-            "-N",
-            "-L", "\(tunnel.localHost):\(tunnel.localPort):\(tunnel.remoteHost):\(tunnel.remotePort)",
-            host,
+        // One -L flag per port mapping, all carried by a single ssh process.
+        var arguments = ["-N"]
+        for mapping in tunnel.portMappings {
+            arguments.append(contentsOf: [
+                "-L", "\(mapping.localHost):\(mapping.localPort):\(mapping.remoteHost):\(mapping.remotePort)"
+            ])
+        }
+
+        // Connection options. In host mode always pass -p (and -i if set); in
+        // alias mode let ~/.ssh/config supply them, overriding -p only for a
+        // non-default port.
+        if !tunnel.useAlias, let identityFile = tunnel.identityFile, !identityFile.isEmpty {
+            arguments.append(contentsOf: ["-i", (identityFile as NSString).expandingTildeInPath])
+        }
+        if !tunnel.useAlias || tunnel.port != 22 {
+            arguments.append(contentsOf: ["-p", "\(tunnel.port)"])
+        }
+
+        // Destination, then robustness/hardening options. Forcing a dedicated,
+        // forward-only connection (RequestTTY / RemoteCommand / ControlMaster /
+        // ControlPath) stops login-oriented alias directives from allocating a
+        // TTY, running a remote shell, or piggybacking on an existing master
+        // socket and making ssh exit early — which the monitor would see as a
+        // drop and respawn, causing the tunnel to flap.
+        arguments.append(host)
+        arguments.append(contentsOf: [
             "-o", "ExitOnForwardFailure=yes",
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
-            // Force a dedicated, forward-only connection. An SSH config alias may
-            // carry login-oriented directives (RequestTTY/RemoteCommand) or
-            // connection sharing (ControlMaster/ControlPath) that are hostile to
-            // `ssh -N`: they make ssh allocate a TTY, run a remote shell, or
-            // piggyback on an existing master socket and exit immediately —
-            // which the monitor then sees as a drop and respawns, causing the
-            // tunnel to flap. Each tunnel must own its own long-lived ssh process.
             "-o", "RequestTTY=no",
             "-o", "RemoteCommand=none",
             "-o", "ControlMaster=no",
             "-o", "ControlPath=none"
-        ]
-
-        // When using alias, skip -p for default port 22 and skip -i entirely
-        if tunnel.useAlias {
-            if tunnel.port != 22 {
-                arguments.insert(contentsOf: ["-p", "\(tunnel.port)"], at: 3)
-            }
-        } else {
-            arguments.insert(contentsOf: ["-p", "\(tunnel.port)"], at: 3)
-            if let identityFile = tunnel.identityFile, !identityFile.isEmpty {
-                let expandedPath = (identityFile as NSString).expandingTildeInPath
-                arguments.insert(contentsOf: ["-i", expandedPath], at: 1)
-            }
-        }
+        ])
 
         process.arguments = arguments
         process.standardOutput = FileHandle.nullDevice
@@ -319,10 +327,7 @@ class TunnelManager {
         let newTunnel = Tunnel(
             name: "New Tunnel",
             host: "user@example.com",
-            port: 22,
-            localPort: 8080,
-            remoteHost: "127.0.0.1",
-            remotePort: 8080
+            port: 22
         )
         tunnels.append(newTunnel)
         Task { await saveTunnels() }
@@ -400,7 +405,7 @@ class TunnelManager {
 
         // Also kill by local port pattern as backup (catches any missed processes)
         for tunnel in tunnels {
-            findAndKillSSHProcesses(localPort: tunnel.localPort)
+            killSSHProcessesForTunnel(tunnel)
         }
 
         processIDs.removeAll()
