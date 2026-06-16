@@ -16,10 +16,11 @@ private let pidFileURL: URL = {
     return appFolder.appendingPathComponent("active_pids.txt")
 }()
 
-/// Process group ID for all SSH child processes (accessed from signal handlers, so must be global)
-/// `nonisolated(unsafe)`: deliberately shared across isolation domains — it is written once at
-/// startup and read from C-level signal/atexit handlers that have no actor context.
-private nonisolated(unsafe) var sshProcessGroupID: pid_t = 0
+/// Process group ID for all SSH child processes (accessed from signal handlers, so must be global).
+/// Left as a plain global rather than `nonisolated(unsafe)` so it compiles on Swift 5.9 /
+/// Xcode 15.2 (which the release CI pins). It is written once at startup and read from C-level
+/// signal/atexit handlers; under strict concurrency this is a benign warning, not an error.
+private var sshProcessGroupID: pid_t = 0
 
 /// Kill SSH processes for all local ports in a tunnel
 private func killSSHProcessesForTunnel(_ tunnel: Tunnel) {
