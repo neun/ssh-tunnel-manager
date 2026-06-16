@@ -39,6 +39,19 @@ struct Tunnel: Identifiable, Codable, Hashable {
         self.useAlias = useAlias
     }
 
+    /// True when `other` would produce the same `ssh` invocation as `self`.
+    /// Name and autoConnect are ignored — changing them needs no reconnect.
+    func hasSameConnection(as other: Tunnel) -> Bool {
+        host == other.host &&
+        port == other.port &&
+        localHost == other.localHost &&
+        localPort == other.localPort &&
+        remoteHost == other.remoteHost &&
+        remotePort == other.remotePort &&
+        identityFile == other.identityFile &&
+        useAlias == other.useAlias
+    }
+
     // Codable conformance - exclude runtime properties
     enum CodingKeys: String, CodingKey {
         case id, name, host, port, localHost, localPort, remoteHost, remotePort, identityFile, autoConnect, useAlias

@@ -214,6 +214,9 @@ struct TunnelDetailView: View {
 
     private func sshCommand(for tunnel: Tunnel) -> String {
         var cmd = "ssh -N -L \(tunnel.localHost):\(tunnel.localPort):\(tunnel.remoteHost):\(tunnel.remotePort)"
+        // Neutralize login-oriented alias directives so this command is safe to
+        // copy/paste for a forward (mirrors how the app launches the tunnel).
+        cmd += " -o RequestTTY=no -o RemoteCommand=none -o ControlMaster=no -o ControlPath=none"
         if tunnel.useAlias {
             // For alias mode, only add -p if not default port
             if tunnel.port != 22 {

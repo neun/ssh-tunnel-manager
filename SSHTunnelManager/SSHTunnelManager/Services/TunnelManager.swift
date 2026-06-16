@@ -1,6 +1,12 @@
 import Foundation
 import SwiftUI
 import Darwin
+import os
+
+private let logger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "SSHTunnelManager",
+    category: "TunnelManager"
+)
 
 /// File to store active PIDs for cleanup on crash/force quit
 private let pidFileURL: URL = {
@@ -11,7 +17,9 @@ private let pidFileURL: URL = {
 }()
 
 /// Process group ID for all SSH child processes (accessed from signal handlers, so must be global)
-private var sshProcessGroupID: pid_t = 0
+/// `nonisolated(unsafe)`: deliberately shared across isolation domains — it is written once at
+/// startup and read from C-level signal/atexit handlers that have no actor context.
+private nonisolated(unsafe) var sshProcessGroupID: pid_t = 0
 
 /// Kill SSH processes using specified local port
 private func findAndKillSSHProcesses(localPort: Int) {
@@ -63,6 +71,7 @@ class TunnelManager {
     private var processIDs: [UUID: Int32] = [:]
     private var connectionStatus: [UUID: ConnectionStatus] = [:]
     private var shouldBeConnected: Set<UUID> = [] // Tracks desired state for reconnection
+    private var connectingInFlight: Set<UUID> = [] // Tunnels whose SSH process is mid-startup
     private let configStore = ConfigStore()
     private var reconnectTask: Task<Void, Never>?
 
@@ -81,7 +90,7 @@ class TunnelManager {
 
         Task {
             await loadTunnels()
-            await autoConnectTunnels()
+            autoConnectTunnels()
         }
 
         // Start reconnection monitor
@@ -92,7 +101,7 @@ class TunnelManager {
         reconnectTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
-                await reconnectDisconnectedTunnels()
+                reconnectDisconnectedTunnels()
             }
         }
     }
@@ -104,16 +113,26 @@ class TunnelManager {
                 continue
             }
 
-            let status = connectionStatus[tunnelID] ?? .disconnected
-            if status == .disconnected {
-                // Mark as connecting and attempt reconnect
-                connectionStatus[tunnelID] = .connecting
-                reconnect(tunnel: tunnel)
+            // Respawn whenever a desired-connected tunnel has no live process and
+            // isn't already starting up. Keying off process liveness (rather than
+            // the status label) is what makes auto-reconnect actually fire after a
+            // tunnel drops — handleProcessTermination leaves the status at
+            // .connecting, which the old `== .disconnected` check never matched.
+            if processIDs[tunnelID] == nil && !connectingInFlight.contains(tunnelID) {
+                beginConnecting(tunnel: tunnel)
             }
         }
     }
 
-    private func reconnect(tunnel: Tunnel) {
+    /// Free the local port, then launch the SSH process for a tunnel.
+    /// `connectingInFlight` guards against concurrent callers (a manual connect
+    /// and the reconnect monitor) racing to start two processes for one tunnel.
+    private func beginConnecting(tunnel: Tunnel) {
+        let id = tunnel.id
+        guard !connectingInFlight.contains(id) else { return }
+        connectingInFlight.insert(id)
+        connectionStatus[id] = .connecting
+
         let localPort = tunnel.localPort
         let tunnelCopy = tunnel
 
@@ -135,9 +154,9 @@ class TunnelManager {
         await configStore.save(tunnels)
     }
 
-    private func autoConnectTunnels() async {
+    private func autoConnectTunnels() {
         for tunnel in tunnels where tunnel.autoConnect {
-            await connectAsync(tunnel: tunnel)
+            connect(tunnel: tunnel)
         }
     }
 
@@ -152,51 +171,54 @@ class TunnelManager {
     func connect(tunnel: Tunnel) {
         guard !isConnected(tunnel) else { return }
 
-        // Mark as should be connected for auto-reconnect
+        // Record desired state so the monitor keeps the tunnel alive, then start.
         shouldBeConnected.insert(tunnel.id)
-        connectionStatus[tunnel.id] = .connecting
-
-        let localPort = tunnel.localPort
-        let tunnelCopy = tunnel
-
-        Task.detached {
-            findAndKillSSHProcesses(localPort: localPort)
-            try? await Task.sleep(for: .milliseconds(100))
-
-            await MainActor.run {
-                self.startSSHProcess(tunnel: tunnelCopy)
-            }
-        }
-    }
-
-    private func connectAsync(tunnel: Tunnel) async {
-        guard !isConnected(tunnel) else { return }
-
-        // Mark as should be connected for auto-reconnect
-        shouldBeConnected.insert(tunnel.id)
-        connectionStatus[tunnel.id] = .connecting
-
-        let localPort = tunnel.localPort
-
-        await Task.detached {
-            findAndKillSSHProcesses(localPort: localPort)
-            try? await Task.sleep(for: .milliseconds(100))
-        }.value
-
-        startSSHProcess(tunnel: tunnel)
+        beginConnecting(tunnel: tunnel)
     }
 
     private func startSSHProcess(tunnel: Tunnel) {
+        // Startup is no longer in flight, whatever the outcome below.
+        connectingInFlight.remove(tunnel.id)
+
+        // The user (or an in-place update) may have cancelled while we were
+        // freeing the local port — don't resurrect a tunnel that's no longer wanted.
+        guard shouldBeConnected.contains(tunnel.id) else {
+            connectionStatus[tunnel.id] = .disconnected
+            return
+        }
+
+        // Reject hosts that would let ssh parse the destination as an option
+        // (e.g. "-oProxyCommand=…") or that are empty — otherwise the reconnect
+        // monitor would respawn a doomed process every few seconds.
+        let host = tunnel.host.trimmingCharacters(in: .whitespaces)
+        guard !host.isEmpty, !host.hasPrefix("-") else {
+            logger.error("Refusing to start tunnel \"\(tunnel.name, privacy: .public)\": invalid host \"\(host, privacy: .public)\"")
+            shouldBeConnected.remove(tunnel.id)
+            connectionStatus[tunnel.id] = .disconnected
+            return
+        }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
 
         var arguments = [
             "-N",
             "-L", "\(tunnel.localHost):\(tunnel.localPort):\(tunnel.remoteHost):\(tunnel.remotePort)",
-            tunnel.host,
+            host,
             "-o", "ExitOnForwardFailure=yes",
             "-o", "ServerAliveInterval=30",
-            "-o", "ServerAliveCountMax=3"
+            "-o", "ServerAliveCountMax=3",
+            // Force a dedicated, forward-only connection. An SSH config alias may
+            // carry login-oriented directives (RequestTTY/RemoteCommand) or
+            // connection sharing (ControlMaster/ControlPath) that are hostile to
+            // `ssh -N`: they make ssh allocate a TTY, run a remote shell, or
+            // piggyback on an existing master socket and exit immediately —
+            // which the monitor then sees as a drop and respawns, causing the
+            // tunnel to flap. Each tunnel must own its own long-lived ssh process.
+            "-o", "RequestTTY=no",
+            "-o", "RemoteCommand=none",
+            "-o", "ControlMaster=no",
+            "-o", "ControlPath=none"
         ]
 
         // When using alias, skip -p for default port 22 and skip -i entirely
@@ -233,7 +255,7 @@ class TunnelManager {
                 }
             }
         } catch {
-            print("Failed to start SSH tunnel: \(error)")
+            logger.error("Failed to start SSH tunnel \"\(tunnel.name, privacy: .public)\": \(error.localizedDescription, privacy: .public)")
             connectionStatus[tunnel.id] = .disconnected
         }
     }
@@ -260,8 +282,9 @@ class TunnelManager {
     }
 
     func disconnect(tunnel: Tunnel) {
-        // Remove from auto-reconnect set
+        // Remove from auto-reconnect set and cancel any in-flight startup
         shouldBeConnected.remove(tunnel.id)
+        connectingInFlight.remove(tunnel.id)
 
         guard let pid = processIDs[tunnel.id] else {
             connectionStatus[tunnel.id] = .disconnected
@@ -282,7 +305,10 @@ class TunnelManager {
     }
 
     func toggle(tunnel: Tunnel) {
-        if isConnected(tunnel) {
+        // Key off desired state so a tunnel that's connecting/reconnecting can be
+        // cancelled — isConnected alone (only .connected) would re-trigger connect
+        // even though the UI already shows .connecting as "on".
+        if shouldBeConnected.contains(tunnel.id) || isConnected(tunnel) {
             disconnect(tunnel: tunnel)
         } else {
             connect(tunnel: tunnel)
@@ -311,13 +337,21 @@ class TunnelManager {
     }
 
     func updateTunnel(_ tunnel: Tunnel) {
-        if let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) {
-            let wasConnected = isConnected(tunnel)
-            if wasConnected {
-                disconnect(tunnel: tunnels[index])
-            }
-            tunnels[index] = tunnel
-            Task { await saveTunnels() }
+        guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) else { return }
+
+        // Restart an active tunnel so new settings take effect (the old code
+        // disconnected but never reconnected). Skip the restart when only
+        // cosmetic fields like the name changed, to avoid needless flapping —
+        // the detail view auto-saves on every focus change.
+        let wasActive = shouldBeConnected.contains(tunnel.id) || processIDs[tunnel.id] != nil
+        let needsRestart = wasActive && !tunnels[index].hasSameConnection(as: tunnel)
+        if needsRestart {
+            disconnect(tunnel: tunnels[index])
+        }
+        tunnels[index] = tunnel
+        Task { await saveTunnels() }
+        if needsRestart {
+            connect(tunnel: tunnel)
         }
     }
 
@@ -355,6 +389,7 @@ class TunnelManager {
         reconnectTask?.cancel()
         reconnectTask = nil
         shouldBeConnected.removeAll()
+        connectingInFlight.removeAll()
 
         let pids = Array(processIDs.values)
 
@@ -391,18 +426,4 @@ class TunnelManager {
         removePIDFile()
     }
 
-    func checkAllStatuses() {
-        for (tunnelID, pid) in processIDs {
-            let result = kill(pid, 0)
-            if result != 0 {
-                processIDs.removeValue(forKey: tunnelID)
-                if shouldBeConnected.contains(tunnelID) {
-                    connectionStatus[tunnelID] = .connecting
-                } else {
-                    connectionStatus[tunnelID] = .disconnected
-                }
-            }
-        }
-        updatePIDFile()
-    }
 }

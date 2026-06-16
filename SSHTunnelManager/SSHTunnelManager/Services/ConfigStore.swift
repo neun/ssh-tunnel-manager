@@ -1,4 +1,10 @@
 import Foundation
+import os
+
+private let logger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "SSHTunnelManager",
+    category: "ConfigStore"
+)
 
 actor ConfigStore {
     private let fileURL: URL
@@ -23,7 +29,7 @@ actor ConfigStore {
             let tunnels = try JSONDecoder().decode([Tunnel].self, from: data)
             return tunnels
         } catch {
-            print("Failed to load tunnels: \(error)")
+            logger.error("Failed to load tunnels: \(error.localizedDescription, privacy: .public)")
             return []
         }
     }
@@ -35,7 +41,7 @@ actor ConfigStore {
             let data = try encoder.encode(tunnels)
             try data.write(to: fileURL, options: .atomic)
         } catch {
-            print("Failed to save tunnels: \(error)")
+            logger.error("Failed to save tunnels: \(error.localizedDescription, privacy: .public)")
         }
     }
 }

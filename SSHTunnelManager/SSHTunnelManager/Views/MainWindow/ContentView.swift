@@ -1,5 +1,11 @@
 import SwiftUI
 import ServiceManagement
+import os
+
+private let logger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "SSHTunnelManager",
+    category: "ContentView"
+)
 
 @MainActor
 struct ContentView: View {
@@ -73,7 +79,7 @@ struct ContentView: View {
                                     try SMAppService.mainApp.unregister()
                                 }
                             } catch {
-                                print("Failed to update login item: \(error)")
+                                logger.error("Failed to update login item: \(error.localizedDescription, privacy: .public)")
                                 launchAtLogin = !newValue
                             }
                         }
