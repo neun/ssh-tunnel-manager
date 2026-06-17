@@ -9,16 +9,21 @@ enum ConnectionStatus {
 struct StatusIndicator: View {
     let status: ConnectionStatus
     var size: CGFloat = 10
+    /// Red overrides the status color to flag a failed/dropped connection that
+    /// the app is retrying — distinct from a deliberately-off (grey) tunnel.
+    var isFailed: Bool = false
 
     private var color: Color {
+        if isFailed { return .red }
         switch status {
-        case .disconnected: return .red
+        case .disconnected: return .secondary
         case .connecting: return .yellow
         case .connected: return .green
         }
     }
 
     private var glowColor: Color {
+        if isFailed { return .red.opacity(0.5) }
         switch status {
         case .disconnected: return .clear
         case .connecting: return .yellow.opacity(0.5)
@@ -39,9 +44,10 @@ struct StatusIndicator: View {
         self.size = size
     }
 
-    init(status: ConnectionStatus, size: CGFloat = 10) {
+    init(status: ConnectionStatus, size: CGFloat = 10, isFailed: Bool = false) {
         self.status = status
         self.size = size
+        self.isFailed = isFailed
     }
 }
 

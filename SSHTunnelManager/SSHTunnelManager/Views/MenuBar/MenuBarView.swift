@@ -82,7 +82,12 @@ struct TunnelMenuItem: View {
         status == .connected || status == .connecting
     }
 
+    private var lastError: String? {
+        tunnelManager.lastError(for: tunnel)
+    }
+
     private var statusColor: Color {
+        if lastError != nil { return .red }
         switch status {
         case .disconnected: return .secondary
         case .connecting: return .orange
@@ -96,15 +101,29 @@ struct TunnelMenuItem: View {
                 .fill(statusColor)
                 .frame(width: 8, height: 8)
 
-            Text(tunnel.name)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(tunnel.name)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                // On error, show the reason here so the tray is self-explanatory
+                // without relying on a hover tooltip.
+                if let lastError {
+                    Text(lastError)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                }
+            }
 
             Spacer(minLength: 8)
 
-            Text(tunnel.localPortsSummary)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            if lastError == nil {
+                Text(tunnel.localPortsSummary)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
 
             Toggle("", isOn: Binding(
                 get: { isOn },
@@ -116,6 +135,7 @@ struct TunnelMenuItem: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
+        .help(lastError ?? "")
     }
 }
 

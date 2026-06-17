@@ -41,13 +41,19 @@ struct TunnelDetailView: View {
         }
     }
 
+    /// Why the tunnel last failed/dropped, while it isn't up. Drives the red
+    /// "Failed" state and the reason row below the status line.
+    private var lastError: String? {
+        tunnelManager.lastError(for: tunnel)
+    }
+
     var body: some View {
         Form {
             Section {
                 HStack {
-                    StatusIndicator(status: status)
-                    Text(statusText)
-                        .foregroundStyle(statusColor)
+                    StatusIndicator(status: status, isFailed: lastError != nil)
+                    Text(lastError != nil ? "Failed" : statusText)
+                        .foregroundStyle(lastError != nil ? .red : statusColor)
 
                     Spacer()
 
@@ -59,6 +65,13 @@ struct TunnelDetailView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(status != .disconnected ? .red : .green)
+                }
+
+                if let lastError {
+                    Label(lastError, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .font(.callout)
+                        .textSelection(.enabled)
                 }
 
                 UsageRow(label: "SSH", value: sshCommand(for: editedTunnel))

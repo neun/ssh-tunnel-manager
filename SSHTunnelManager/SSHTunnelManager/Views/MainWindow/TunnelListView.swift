@@ -128,21 +128,34 @@ struct TunnelRow: View {
     let tunnel: Tunnel
     @Environment(TunnelManager.self) private var tunnelManager
 
+    private var lastError: String? {
+        tunnelManager.lastError(for: tunnel)
+    }
+
     var body: some View {
         HStack(spacing: 8) {
-            StatusIndicator(status: tunnelManager.status(for: tunnel), size: 8)
+            StatusIndicator(status: tunnelManager.status(for: tunnel), size: 8, isFailed: lastError != nil)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(tunnel.name)
                     .fontWeight(.medium)
                     .lineLimit(1)
 
-                Text(tunnel.mappingsSummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if let lastError {
+                    Text(lastError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                } else {
+                    Text(tunnel.mappingsSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(.vertical, 2)
+        .help(lastError ?? "")
     }
 }
 

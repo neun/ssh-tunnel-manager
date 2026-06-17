@@ -182,6 +182,7 @@ class TunnelManager {
     private var shouldBeConnected: Set<UUID> = [] // Tracks desired state for reconnection
     private var connectingInFlight: Set<UUID> = [] // Tunnels whose SSH process is mid-startup
     private var establishedTunnels: Set<UUID> = [] // Connections that survived the grace period (gates feedback)
+    private var lastErrors: [UUID: String] = [:] // Why each tunnel last failed/dropped — sticky until it establishes or is stopped
     private let configStore = ConfigStore()
     private var reconnectTask: Task<Void, Never>?
 
@@ -275,6 +276,13 @@ class TunnelManager {
 
     func status(for tunnel: Tunnel) -> ConnectionStatus {
         connectionStatus[tunnel.id] ?? .disconnected
+    }
+
+    /// Why the tunnel last failed to connect or dropped, if it isn't currently
+    /// up. nil when it's connected or was stopped cleanly. Sticky across the
+    /// auto-reconnect retries, so the reason stays put instead of flickering.
+    func lastError(for tunnel: Tunnel) -> String? {
+        lastErrors[tunnel.id]
     }
 
     func connect(tunnel: Tunnel) {
@@ -378,7 +386,11 @@ class TunnelManager {
 
         process.arguments = arguments
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        // Capture ssh's diagnostics so a failed/dropped tunnel has a recorded
+        // reason. `ssh -N` writes only a few lines here (well under the pipe
+        // buffer), so draining it once at exit can't deadlock the connection.
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
 
         do {
             try process.run()
@@ -405,6 +417,8 @@ class TunnelManager {
                     let isUp = await Task.detached { isLocalPortOpen(localPort) }.value
                     guard let self, self.processIDs[tunnelID] == pid else { return }
                     if isUp {
+                        // Genuinely up — drop any stale failure reason.
+                        self.lastErrors.removeValue(forKey: tunnelID)
                         if self.establishedTunnels.insert(tunnelID).inserted {
                             TunnelSound.playConnected()
                             TunnelNotification.notifyConnected(tunnelName: tunnelName)
@@ -415,9 +429,15 @@ class TunnelManager {
             }
 
             Task.detached { [weak self] in
+                // readDataToEndOfFile blocks until ssh closes stderr (i.e. exits),
+                // so it doubles as the "wait for exit" before reading the code.
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
+                let exitCode = process.terminationStatus
+                let bySignal = process.terminationReason == .uncaughtSignal
+                let stderr = String(decoding: errorData, as: UTF8.self)
                 await MainActor.run { [weak self] in
-                    self?.handleProcessTermination(tunnelID: tunnelID)
+                    self?.handleProcessTermination(tunnelID: tunnelID, stderr: stderr, exitCode: exitCode, terminatedBySignal: bySignal)
                 }
             }
         } catch {
@@ -435,17 +455,29 @@ class TunnelManager {
         }
     }
 
-    private func handleProcessTermination(tunnelID: UUID) {
+    private func handleProcessTermination(tunnelID: UUID, stderr: String, exitCode: Int32, terminatedBySignal: Bool) {
         processIDs.removeValue(forKey: tunnelID)
         let wasEstablished = establishedTunnels.remove(tunnelID) != nil
+        // A clean exit (status 0) or a process we/something signalled, with no
+        // diagnostics on stderr, isn't a connection failure worth flagging — it's
+        // an internal restart or external kill, not "auth failed"/"refused".
+        let cleanStop = stderr.isEmpty && (exitCode == 0 || terminatedBySignal)
         // If should still be connected, mark as connecting (will trigger reconnect)
         // Otherwise mark as disconnected
         if shouldBeConnected.contains(tunnelID) {
             connectionStatus[tunnelID] = .connecting
+            // Record *why* it failed/dropped. Sticky: it persists through the
+            // reconnect retries and is cleared only once the tunnel establishes
+            // (grace task) or the user stops it (disconnect) — so the UI shows a
+            // stable reason instead of a bare spinner, and never flickers.
+            if !cleanStop {
+                lastErrors[tunnelID] = classifyFailure(stderr: stderr, exitCode: exitCode)
+            }
             // Announce only genuine drops of connections that were actually up.
-            // A manual disconnect clears shouldBeConnected first (silent), and a
-            // flap never became "established" (silent) — so no nuisance beeps.
-            if wasEstablished {
+            // A manual disconnect clears shouldBeConnected first (silent), a flap
+            // never became "established" (silent), and a clean internal restart
+            // isn't a drop — so no nuisance beeps.
+            if wasEstablished && !cleanStop {
                 let tunnelName = tunnels.first(where: { $0.id == tunnelID })?.name ?? "Tunnel"
                 TunnelSound.playDisconnected()
                 TunnelNotification.notifyDisconnected(tunnelName: tunnelName)
@@ -456,11 +488,58 @@ class TunnelManager {
         updatePIDFile()
     }
 
+    /// Best-effort mapping of ssh's stderr to a short, human-readable reason.
+    /// OpenSSH wording isn't a stable API and varies by version/locale, so this
+    /// degrades gracefully: a known phrase → a friendly line, otherwise the last
+    /// non-empty stderr line, otherwise the exit code. It is never blank.
+    private func classifyFailure(stderr: String, exitCode: Int32) -> String {
+        let s = stderr.lowercased()
+        if s.contains("permission denied")
+            || s.contains("too many authentication failures")
+            || s.contains("no more authentication methods") {
+            return "Authentication failed — check your key or identity file."
+        }
+        if s.contains("connection refused") {
+            return "Connection refused — the SSH server may be down or on another port."
+        }
+        if s.contains("operation timed out")
+            || s.contains("connection timed out")
+            || s.contains("no route to host")
+            || s.contains("network is unreachable") {
+            return "Host unreachable — check the network or a firewall."
+        }
+        if s.contains("could not resolve hostname")
+            || s.contains("name or service not known")
+            || s.contains("nodename nor servname") {
+            return "Couldn’t resolve the host name (DNS)."
+        }
+        if s.contains("host key verification failed")
+            || s.contains("remote host identification has changed") {
+            return "Host key changed — enable “Skip host key check” if the host was recreated."
+        }
+        if s.contains("address already in use") || s.contains("cannot listen to port") {
+            return "A local forward port is already in use."
+        }
+        if s.contains("administratively prohibited") || s.contains("open failed") {
+            return "The server refused the port forward."
+        }
+        // Unknown wording — surface the last meaningful stderr line, else the code.
+        if let line = stderr
+            .split(whereSeparator: \.isNewline)
+            .map({ $0.trimmingCharacters(in: .whitespaces) })
+            .last(where: { !$0.isEmpty }) {
+            return line
+        }
+        return "Disconnected unexpectedly (ssh exit \(exitCode))."
+    }
+
     func disconnect(tunnel: Tunnel) {
         // Remove from auto-reconnect set and cancel any in-flight startup
         shouldBeConnected.remove(tunnel.id)
         connectingInFlight.remove(tunnel.id)
         establishedTunnels.remove(tunnel.id)
+        // A deliberate stop is not a failure — clear any recorded reason.
+        lastErrors.removeValue(forKey: tunnel.id)
 
         guard let pid = processIDs[tunnel.id] else {
             connectionStatus[tunnel.id] = .disconnected
