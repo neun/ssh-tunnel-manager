@@ -202,6 +202,15 @@ struct TunnelDetailView: View {
                 Text("A blank field uses its placeholder default; hover a field for what it does. Connect Timeout is off unless set.")
             }
 
+            Section {
+                Toggle("Compression", isOn: $editedTunnel.compression)
+                    .help("Compress the data stream (-C). Can help on slow links; costs CPU.")
+                Toggle("TCP Keep-Alive", isOn: $editedTunnel.tcpKeepAlive)
+                    .help("Lower-level than Alive Interval above — detects a dead network path rather than an unresponsive ssh server.")
+            } header: {
+                Text("Advanced")
+            }
+
             if status == .connected {
                 Section {
                     ForEach(editedTunnel.portMappings) { mapping in
@@ -286,6 +295,12 @@ struct TunnelDetailView: View {
         cmd += " -o ServerAliveCountMax=\(tunnel.serverAliveCountMax ?? Tunnel.defaultServerAliveCountMax)"
         if let connectTimeout = tunnel.connectTimeout {
             cmd += " -o ConnectTimeout=\(connectTimeout)"
+        }
+        if tunnel.compression {
+            cmd += " -C"
+        }
+        if tunnel.tcpKeepAlive {
+            cmd += " -o TCPKeepAlive=yes"
         }
         if tunnel.useAlias {
             if tunnel.port != 22 {
