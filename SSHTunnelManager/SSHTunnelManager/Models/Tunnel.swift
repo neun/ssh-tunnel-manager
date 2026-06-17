@@ -62,6 +62,15 @@ struct Tunnel: Identifiable, Codable, Hashable {
     var serverAliveInterval: Int?    // -o ServerAliveInterval=N (seconds)
     var serverAliveCountMax: Int?    // -o ServerAliveCountMax=N
 
+    // Simple on/off connection options. Unlike the Int? options above these
+    // have an unambiguous "off" state, so a plain Bool (defaulting to false)
+    // is enough — no separate "use app default" case to represent.
+    var compression: Bool      // -C (compress the data stream)
+    var tcpKeepAlive: Bool     // -o TCPKeepAlive=yes — a lower-level signal
+                                // than ServerAliveInterval/CountMax above: TCP-
+                                // level dead-path detection vs. an
+                                // ssh-protocol-level liveness check.
+
     /// Fallback used when a tunnel doesn't override `serverAliveInterval`.
     static let defaultServerAliveInterval = 30
     /// Fallback used when a tunnel doesn't override `serverAliveCountMax`.
@@ -78,7 +87,9 @@ struct Tunnel: Identifiable, Codable, Hashable {
         useAlias: Bool = false,
         connectTimeout: Int? = nil,
         serverAliveInterval: Int? = nil,
-        serverAliveCountMax: Int? = nil
+        serverAliveCountMax: Int? = nil,
+        compression: Bool = false,
+        tcpKeepAlive: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -91,6 +102,8 @@ struct Tunnel: Identifiable, Codable, Hashable {
         self.connectTimeout = connectTimeout
         self.serverAliveInterval = serverAliveInterval
         self.serverAliveCountMax = serverAliveCountMax
+        self.compression = compression
+        self.tcpKeepAlive = tcpKeepAlive
     }
 
     /// True when `other` would produce the same `ssh` invocation as `self`.
@@ -103,12 +116,15 @@ struct Tunnel: Identifiable, Codable, Hashable {
         useAlias == other.useAlias &&
         connectTimeout == other.connectTimeout &&
         serverAliveInterval == other.serverAliveInterval &&
-        serverAliveCountMax == other.serverAliveCountMax
+        serverAliveCountMax == other.serverAliveCountMax &&
+        compression == other.compression &&
+        tcpKeepAlive == other.tcpKeepAlive
     }
 
     enum CodingKeys: String, CodingKey {
         case id, name, host, port, portMappings, identityFile, autoConnect, useAlias
         case connectTimeout, serverAliveInterval, serverAliveCountMax
+        case compression, tcpKeepAlive
         // Legacy single-mapping fields
         case localHost, localPort, remoteHost, remotePort
     }
@@ -126,6 +142,10 @@ struct Tunnel: Identifiable, Codable, Hashable {
         connectTimeout = try container.decodeIfPresent(Int.self, forKey: .connectTimeout)
         serverAliveInterval = try container.decodeIfPresent(Int.self, forKey: .serverAliveInterval)
         serverAliveCountMax = try container.decodeIfPresent(Int.self, forKey: .serverAliveCountMax)
+        // Absent in older configs — false matches today's behavior (neither
+        // flag is currently passed to ssh at all).
+        compression = try container.decodeIfPresent(Bool.self, forKey: .compression) ?? false
+        tcpKeepAlive = try container.decodeIfPresent(Bool.self, forKey: .tcpKeepAlive) ?? false
 
         if let mappings = try container.decodeIfPresent([PortMapping].self, forKey: .portMappings),
            !mappings.isEmpty {
@@ -158,6 +178,8 @@ struct Tunnel: Identifiable, Codable, Hashable {
         try container.encodeIfPresent(connectTimeout, forKey: .connectTimeout)
         try container.encodeIfPresent(serverAliveInterval, forKey: .serverAliveInterval)
         try container.encodeIfPresent(serverAliveCountMax, forKey: .serverAliveCountMax)
+        try container.encode(compression, forKey: .compression)
+        try container.encode(tcpKeepAlive, forKey: .tcpKeepAlive)
     }
 
     var mappingsSummary: String {

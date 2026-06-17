@@ -335,6 +335,12 @@ class TunnelManager {
         if !tunnel.useAlias || tunnel.port != 22 {
             arguments.append(contentsOf: ["-p", "\(tunnel.port)"])
         }
+        if tunnel.compression {
+            arguments.append("-C")
+        }
+        if tunnel.tcpKeepAlive {
+            arguments.append(contentsOf: ["-o", "TCPKeepAlive=yes"])
+        }
 
         // Destination, then robustness/hardening options. Forcing a dedicated,
         // forward-only connection (RequestTTY / RemoteCommand / ControlMaster /
