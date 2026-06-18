@@ -298,11 +298,13 @@ class TunnelManager {
     /// the second fail to bind — this lets the UI warn before that happens.
     /// Returns each shared port mapped to the names of the other tunnels on it.
     func localPortConflicts(for tunnel: Tunnel) -> [Int: [String]] {
-        let myPorts = Set(tunnel.portMappings.map(\.localPort))
+        // Only ports bound on this Mac can clash — a remote forward (-R) binds
+        // on the server, so its port lives in a different namespace.
+        let myPorts = Set(tunnel.locallyBoundPorts)
         guard !myPorts.isEmpty else { return [:] }
         var conflicts: [Int: [String]] = [:]
         for other in tunnels where other.id != tunnel.id {
-            for port in Set(other.portMappings.map(\.localPort)) where myPorts.contains(port) {
+            for port in Set(other.locallyBoundPorts) where myPorts.contains(port) {
                 conflicts[port, default: []].append(other.name.isEmpty ? "Untitled" : other.name)
             }
         }
@@ -343,8 +345,10 @@ class TunnelManager {
         // launch a doomed process — which would also fool the local-port probe
         // (the port reads as "open" because its real owner holds it) into a false
         // "connected" flap. Our own prior process was already killed in
-        // beginConnecting, so an open port here means a different owner.
-        if let takenPort = tunnel.portMappings.map(\.localPort).first(where: { isLocalPortOpen($0) }) {
+        // beginConnecting, so an open port here means a different owner. Only
+        // locally-bound forwards count — a remote forward (-R) binds on the
+        // server, so its port isn't ours to check here.
+        if let takenPort = tunnel.locallyBoundPorts.first(where: { isLocalPortOpen($0) }) {
             let by = localPortConflicts(for: tunnel)[takenPort]
                 .map { " by \($0.joined(separator: ", "))" } ?? ""
             lastErrors[tunnel.id] = "Local port \(takenPort) is already in use\(by). Only one tunnel can bind it at a time."
@@ -367,11 +371,12 @@ class TunnelManager {
                     "-L", "\(mapping.localHost):\(mapping.localPort):\(mapping.remoteHost):\(mapping.remotePort)"
                 ])
             case .remote:
-                // ssh -R [bind_address:]port:host:hostport — the remote host
-                // binds `port` and forwards what it receives back to
-                // host:hostport, which is normally this Mac (localhost).
+                // ssh -R [bind_address:]port:host:hostport. Fields stay consistent
+                // with -L/-D — Local* is always this Mac, Remote* the far side — so
+                // the server binds the Remote address and forwards back to the Local
+                // host:port here. (That's the reverse of -L's data direction.)
                 arguments.append(contentsOf: [
-                    "-R", "\(mapping.localHost):\(mapping.localPort):\(mapping.remoteHost):\(mapping.remotePort)"
+                    "-R", "\(mapping.remoteHost):\(mapping.remotePort):\(mapping.localHost):\(mapping.localPort)"
                 ])
             case .dynamic:
                 arguments.append(contentsOf: [
@@ -458,22 +463,27 @@ class TunnelManager {
             // fires promptly on a fast connect, never on a host that just hangs,
             // and not during a reconnect storm. Surviving this also marks the
             // tunnel "established", which gates the disconnect feedback below.
-            let localPort = tunnel.portMappings.first?.localPort
+            // A locally-bound forward (-L/-D) lets us confirm "up" by probing its
+            // port. A pure remote forward (-R) binds on the server with nothing to
+            // probe here, so fall back to "the process survived the grace window" —
+            // ExitOnForwardFailure makes a bad -R bind exit fast, so a survivor is
+            // a reliable enough success signal.
+            let probePort = tunnel.locallyBoundPorts.first
             Task { [weak self] in
-                guard let localPort else { return }
-                for _ in 0..<150 { // up to ~30s while the process stays alive
-                    try? await Task.sleep(for: .milliseconds(200))
-                    let isUp = await Task.detached { isLocalPortOpen(localPort) }.value
-                    guard let self, self.processIDs[tunnelID] == pid else { return }
-                    if isUp {
-                        // Genuinely up — drop any stale failure reason.
-                        self.lastErrors.removeValue(forKey: tunnelID)
-                        if self.establishedTunnels.insert(tunnelID).inserted {
-                            TunnelSound.playConnected()
-                            TunnelNotification.notifyConnected(tunnelName: tunnelName)
+                if let probePort {
+                    for _ in 0..<150 { // up to ~30s while the process stays alive
+                        try? await Task.sleep(for: .milliseconds(200))
+                        let isUp = await Task.detached { isLocalPortOpen(probePort) }.value
+                        guard let self, self.processIDs[tunnelID] == pid else { return }
+                        if isUp {
+                            self.markEstablished(tunnelID: tunnelID, tunnelName: tunnelName)
+                            return
                         }
-                        return
                     }
+                } else {
+                    try? await Task.sleep(for: .seconds(2))
+                    guard let self, self.processIDs[tunnelID] == pid else { return }
+                    self.markEstablished(tunnelID: tunnelID, tunnelName: tunnelName)
                 }
             }
 
@@ -501,6 +511,17 @@ class TunnelManager {
             removePIDFile()
         } else {
             savePIDsToFile(pids)
+        }
+    }
+
+    /// Mark a tunnel as genuinely up: clear any stale failure reason and, the
+    /// first time it establishes, fire the connect cue. Shared by the local-port
+    /// probe and the remote-forward survival path.
+    private func markEstablished(tunnelID: UUID, tunnelName: String) {
+        lastErrors.removeValue(forKey: tunnelID)
+        if establishedTunnels.insert(tunnelID).inserted {
+            TunnelSound.playConnected()
+            TunnelNotification.notifyConnected(tunnelName: tunnelName)
         }
     }
 
@@ -568,6 +589,9 @@ class TunnelManager {
         }
         if s.contains("address already in use") || s.contains("cannot listen to port") {
             return "A local forward port is already in use."
+        }
+        if s.contains("remote port forwarding failed") {
+            return "The server couldn’t bind the remote-forward port — it may already be in use there (or needs root for a port below 1024)."
         }
         if s.contains("administratively prohibited") || s.contains("open failed") {
             return "The server refused the port forward."

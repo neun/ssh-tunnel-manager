@@ -8,6 +8,9 @@ struct TunnelDetailView: View {
 
     @State private var editedTunnel: Tunnel
     @State private var hasChanges = false
+    // Jump host is a rare power-user knob — keep it collapsed by default so it
+    // doesn't crowd the common case, but auto-expand it when one is already set.
+    @State private var showJumpHost: Bool
 
     enum Field: Hashable {
         case name, host, port, identityFile, alias
@@ -20,6 +23,7 @@ struct TunnelDetailView: View {
     init(tunnel: Tunnel) {
         self.tunnel = tunnel
         self._editedTunnel = State(initialValue: tunnel)
+        self._showJumpHost = State(initialValue: !(tunnel.proxyJump ?? "").isEmpty)
     }
 
     private var status: ConnectionStatus {
@@ -142,6 +146,30 @@ struct TunnelDetailView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                DisclosureGroup(isExpanded: $showJumpHost) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("e.g. bastion.example.com", text: Binding(
+                            get: { editedTunnel.proxyJump ?? "" },
+                            set: { editedTunnel.proxyJump = $0.isEmpty ? nil : $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .focused($focusedField, equals: .proxyJump)
+                        .help("Adds -J <value>. Reaches the host through one or more bastion hosts, replacing a manual multi-hop ssh.")
+
+                        Text("Optional — routes the login through a bastion to reach the host. Only a login path, not the data flow; -L/-R targets still resolve from the final host. A jump-host-specific key/user goes in ~/.ssh/config. Format: user@host[:port][,user@host2…]")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 2)
+                } label: {
+                    // Make the whole label row toggle, not just the chevron —
+                    // DisclosureGroup only wires the triangle up by default on macOS.
+                    Text("Jump host")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture { withAnimation { showJumpHost.toggle() } }
+                }
             } header: {
                 Text("SSH Connection")
             }
@@ -253,21 +281,6 @@ struct TunnelDetailView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                VStack(alignment: .leading, spacing: 2) {
-                    LabeledContent("Jump Host") {
-                        TextField("e.g. bastion.example.com", text: Binding(
-                            get: { editedTunnel.proxyJump ?? "" },
-                            set: { editedTunnel.proxyJump = $0.isEmpty ? nil : $0 }
-                        ))
-                        .textFieldStyle(.roundedBorder)
-                        .labelsHidden()
-                        .focused($focusedField, equals: .proxyJump)
-                        .help("Adds -J <value>. Hops through one or more intermediate hosts to reach the host above, replacing a manual multi-hop ssh. Multiple hops: user@a,user@b.")
-                    }
-                    Text("Optional. Leave blank to connect directly. Format matches ssh -J: user@host[:port][,user@host2[:port2]...]")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
             } header: {
                 Text("Advanced")
             }
@@ -282,8 +295,8 @@ struct TunnelDetailView: View {
                             UsageRow(label: "socks5", value: "socks5://\(mapping.localHost):\(mapping.localPort)")
                         case .remote:
                             UsageRow(
-                                label: "R :\(mapping.localPort)",
-                                value: "listening on the remote host — forwards to \(mapping.remoteHost):\(mapping.remotePort) here"
+                                label: "R :\(mapping.remotePort)",
+                                value: "server listens on \(mapping.remoteHost):\(mapping.remotePort) → \(mapping.localHost):\(mapping.localPort) here"
                             )
                         case .local:
                             UsageRow(
@@ -352,7 +365,7 @@ struct TunnelDetailView: View {
             case .local:
                 cmd += " -L \(mapping.localHost):\(mapping.localPort):\(mapping.remoteHost):\(mapping.remotePort)"
             case .remote:
-                cmd += " -R \(mapping.localHost):\(mapping.localPort):\(mapping.remoteHost):\(mapping.remotePort)"
+                cmd += " -R \(mapping.remoteHost):\(mapping.remotePort):\(mapping.localHost):\(mapping.localPort)"
             case .dynamic:
                 cmd += " -D \(mapping.localHost):\(mapping.localPort)"
             }
@@ -411,7 +424,7 @@ struct PortMappingEditor: View {
             .pickerStyle(.segmented)
             .labelsHidden()
 
-            LabeledContent(mapping.forward == .dynamic ? "Listen" : (mapping.forward == .remote ? "On Remote" : "Local")) {
+            LabeledContent(mapping.forward == .dynamic ? "Listen" : "Local") {
                 HStack(spacing: 4) {
                     TextField("Host", text: $mapping.localHost)
                         .textFieldStyle(.roundedBorder)
@@ -429,7 +442,7 @@ struct PortMappingEditor: View {
 
             switch mapping.forward {
             case .local, .remote:
-                LabeledContent(mapping.forward == .remote ? "Back to (usually this Mac)" : "Remote") {
+                LabeledContent("Remote") {
                     HStack(spacing: 4) {
                         TextField("Host", text: $mapping.remoteHost)
                             .textFieldStyle(.roundedBorder)
@@ -445,7 +458,7 @@ struct PortMappingEditor: View {
                     }
                 }
                 if mapping.forward == .remote {
-                    Text("The remote host binds this port and forwards what it receives back to the host:port below — usually localhost on this Mac.")
+                    Text("Reverse of a local forward: the server listens on the Remote address and sends connections back to the Local port on this Mac. Set the Remote host to 0.0.0.0 (and enable GatewayPorts on the server) to accept connections from beyond the server itself.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

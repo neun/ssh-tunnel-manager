@@ -207,7 +207,7 @@ struct Tunnel: Identifiable, Codable, Hashable {
         portMappings.map { m in
             switch m.forward {
             case .dynamic: return "SOCKS :\(m.localPort)"
-            case .remote: return "R :\(m.localPort) → :\(m.remotePort)"
+            case .remote: return "R :\(m.remotePort) → :\(m.localPort)"
             case .local: return ":\(m.localPort) → :\(m.remotePort)"
             }
         }.joined(separator: ", ")
@@ -215,6 +215,15 @@ struct Tunnel: Identifiable, Codable, Hashable {
 
     var localPortsSummary: String {
         portMappings.map { ":\($0.localPort)" }.joined(separator: ", ")
+    }
+
+    /// Ports this tunnel binds on *this* Mac. Local forwards (-L) and SOCKS
+    /// proxies (-D) listen locally; a remote forward (-R) binds on the server,
+    /// so its `localPort` is a remote port and must be excluded from any
+    /// local-port check (conflict detection, the "already in use" pre-flight,
+    /// the establish probe).
+    var locallyBoundPorts: [Int] {
+        portMappings.filter { $0.forward != .remote }.map(\.localPort)
     }
 }
 
