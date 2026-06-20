@@ -13,7 +13,7 @@ jobs:
     runs-on: macos-14
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_15.2.app
@@ -44,7 +44,7 @@ jobs:
             SSHTunnelManager.dmg
 
       - name: Upload Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: SSHTunnelManager.dmg
           generate_release_notes: true
